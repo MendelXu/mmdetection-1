@@ -188,7 +188,7 @@ def main():
 
     model = build_detector(
         cfg.model, train_cfg=cfg.train_cfg, test_cfg=cfg.test_cfg)
-
+    #model.load_state_dict(torch.load('/home/v-mengdexu/AdelaiDet/mm.pth')['state_dict'])
     datasets = [build_dataset(cfg.data.train)]
     if len(cfg.workflow) == 2:
         val_dataset = copy.deepcopy(cfg.data.val)
@@ -202,6 +202,7 @@ def main():
             CLASSES=datasets[0].CLASSES)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    logger.info(model.__repr__)
     train_detector(
         model,
         datasets,

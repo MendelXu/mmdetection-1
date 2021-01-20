@@ -10,8 +10,9 @@ from .anchor_free_head import AnchorFreeHead
 from mmdet.utils.instances import Instances
 from mmdet.utils.common import compute_locations
 from itertools import accumulate
-
-
+from mmcv.utils import print_log
+from mmcv.runner import get_dist_info
+import pdb
 INF = 1e8
 
 
@@ -200,6 +201,7 @@ class FCOSHeadCondConv(AnchorFreeHead):
              gt_bboxes,
              gt_labels,
              img_metas,
+             gt_masks=None,
              gt_bboxes_ignore=None):
         """Compute loss of the head.
 
@@ -228,7 +230,7 @@ class FCOSHeadCondConv(AnchorFreeHead):
         all_level_points = self.get_points(featmap_sizes, bbox_preds[0].dtype,
                                            bbox_preds[0].device)
         labels, bbox_targets, gt_inds = self.get_targets(all_level_points, gt_bboxes,
-                                                gt_labels)
+                                                gt_labels,gt_masks)
 
         num_imgs = cls_scores[0].size(0)
         # flatten cls_scores, bbox_preds and centerness
@@ -268,7 +270,7 @@ class FCOSHeadCondConv(AnchorFreeHead):
 
         pos_bbox_preds = flatten_bbox_preds[pos_inds]
         pos_centerness = flatten_centerness[pos_inds]
-
+       
         if len(pos_inds) > 0:
             pos_bbox_targets = flatten_bbox_targets[pos_inds]
             pos_centerness_targets = self.centerness_target(pos_bbox_targets)
@@ -279,6 +281,8 @@ class FCOSHeadCondConv(AnchorFreeHead):
             # centerness weighted iou loss
             centerness_denorm = max(
                 reduce_mean(pos_centerness_targets.sum().detach()), 1e-6)
+            if get_dist_info()[0]==0:
+                print_log(f'centerness_sum:{centerness_denorm.item()};num_pos:{num_pos}')
             loss_bbox = self.loss_bbox(
                 pos_decoded_bbox_preds,
                 pos_decoded_target_preds,
@@ -291,9 +295,9 @@ class FCOSHeadCondConv(AnchorFreeHead):
             loss_centerness = pos_centerness.sum()
 
         return dict(
-            loss_cls=loss_cls,
-            loss_bbox=loss_bbox,
-            loss_centerness=loss_centerness)
+            loss_fcos_cls=loss_cls,
+            loss_focs_loc=loss_bbox,
+            loss_fcos_ctr=loss_centerness)
 
     @force_fp32(apply_to=('cls_scores', 'bbox_preds', 'centernesses'))
     def get_bboxes(self,
@@ -476,7 +480,7 @@ class FCOSHeadCondConv(AnchorFreeHead):
                              dim=-1) + stride // 2
         return points
 
-    def get_targets(self, points, gt_bboxes_list, gt_labels_list):
+    def get_targets(self, points, gt_bboxes_list, gt_labels_list,gt_masks_list=None):
         """Compute regression, classification and centerss targets for points
         in multiple images.
 
@@ -507,12 +511,14 @@ class FCOSHeadCondConv(AnchorFreeHead):
 
         # the number of points per img, per lvl
         num_points = [center.size(0) for center in points]
-
+        if gt_masks_list is None:
+            gt_masks_list = [None]*len(gt_labels_list)
         # get labels and bbox_targets of each image
         labels_list, bbox_targets_list, gt_inds = multi_apply(
             self._get_target_single,
             gt_bboxes_list,
             gt_labels_list,
+            gt_masks_list,
             points=concat_points,
             regress_ranges=concat_regress_ranges,
             num_points_per_lvl=num_points)
@@ -545,7 +551,7 @@ class FCOSHeadCondConv(AnchorFreeHead):
             concat_gt_inds.append(torch.cat([gt_inds[i] for gt_inds in shift_gt_inds]))
         return concat_lvl_labels, concat_lvl_bbox_targets, concat_gt_inds
 
-    def _get_target_single(self, gt_bboxes, gt_labels, points, regress_ranges,
+    def _get_target_single(self, gt_bboxes, gt_labels, gt_bit_masks, points, regress_ranges,
                            num_points_per_lvl):
         """Compute regression and classification targets for a single image."""
         num_points = points.size(0)
@@ -575,8 +581,23 @@ class FCOSHeadCondConv(AnchorFreeHead):
         if self.center_sampling:
             # condition1: inside a `center bbox`
             radius = self.center_sample_radius
-            center_xs = (gt_bboxes[..., 0] + gt_bboxes[..., 2]) / 2
-            center_ys = (gt_bboxes[..., 1] + gt_bboxes[..., 3]) / 2
+            if gt_bit_masks is not None:
+                _, _h, _w = gt_bit_masks.size()
+
+                _ys = torch.arange(0, _h, dtype=torch.float32, device=gt_bit_masks.device)
+                _xs = torch.arange(0, _w, dtype=torch.float32, device=gt_bit_masks.device)
+
+                m00 = gt_bit_masks.sum(dim=-1).sum(dim=-1).clamp(min=1e-6)
+                m10 = (gt_bit_masks * _xs).sum(dim=-1).sum(dim=-1)
+                m01 = (gt_bit_masks * _ys[:, None]).sum(dim=-1).sum(dim=-1)
+                center_xs = m10 / m00
+                center_ys = m01 / m00
+                center_xs = center_xs[None,...].expand(num_points,num_gts)
+                center_ys = center_ys[None,...].expand(num_points,num_gts)
+                
+            else:
+                center_xs = (gt_bboxes[..., 0] + gt_bboxes[..., 2]) / 2
+                center_ys = (gt_bboxes[..., 1] + gt_bboxes[..., 3]) / 2
             center_gts = torch.zeros_like(gt_bboxes)
             stride = center_xs.new_zeros(center_xs.shape)
 
@@ -677,14 +698,26 @@ class FCOSHeadCondConv(AnchorFreeHead):
                 losses: (dict[str, Tensor]): A dictionary of loss components.
                 proposal_list (list[Tensor]): Proposals of each image.
         """
+
+#        features = torch.load('/home/v-mengdexu/AdelaiDet/features.pth')
+#        x = [features[index] for index in ['p3','p4','p5','p6','p7']]
+#        gt_instance = torch.load('/home/v-mengdexu/AdelaiDet/gt.pth')
+#
+#        gt_bboxes = [gt_inst.gt_boxes.tensor for gt_inst in gt_instance]
+#        gt_labels = [gt_inst.gt_classes for gt_inst in gt_instance]
+#        gt_masks = [gt_inst.gt_bitmasks_full for gt_inst in gt_instance]
+
         if gt_masks:
             self.masknum_sum = tuple(accumulate([0]+[len(mask) for mask in gt_masks][:-1]))
         outs = self(x)
+        
         if gt_labels is None:
             loss_inputs = outs + (gt_bboxes, img_metas)
         else:
-            loss_inputs = outs + (gt_bboxes, gt_labels, img_metas)
+            loss_inputs = outs + (gt_bboxes, gt_labels, img_metas,gt_masks)
+        
         losses = self.loss(*loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
+#        print(losses)
         if self.mask_head:
             self.pred_instances = self.pred_instances[self.pred_instances.gt_inds != INF] # select only foreground labels
             mask_loss = self.mask_head(x, self.pred_instances, gt_masks, gt_labels)

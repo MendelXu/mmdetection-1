@@ -92,5 +92,7 @@ class ZipReader(object):
     def read(path):
         zip_path, path_img = ZipReader.split_zip_style_path(path)
         zfile = ZipReader.get_zipfile(zip_path)
-        data = zfile.read(path_img)
+        set_name = zip_path.split(os.sep)[-1].split('.')[0]
+        data = zfile.read(os.path.join(set_name,path_img))
+#        data = zfile.read(path_img)
         return data

@@ -8,7 +8,9 @@ model = dict(
         dcn_on_last_conv=False,
         center_sampling=True,
         conv_bias=True,
-        loss_bbox=dict(type='GIoULoss', loss_weight=1.0)))
+        loss_bbox=dict(type='GIoULoss', loss_weight=1.0),
+        )
+)
 # training and testing settings
 test_cfg = dict(nms=dict(type='nms', iou_threshold=0.6))
 
@@ -50,5 +52,13 @@ data = dict(
     val=dict(pipeline=test_pipeline),
     test=dict(pipeline=test_pipeline))
 optimizer_config = dict(_delete_=True, grad_clip=None)
+optimizer=dict(paramwise_cfg=dict(bias_lr_mult=1.0, bias_decay_mult=0.0))
 
-lr_config = dict(warmup='linear')
+lr_config = dict(warmup='linear',warmup_ratio=0.001,warmup_iters=1000)
+
+log_config = dict(
+    interval=20,
+    hooks=[
+        dict(type='TextLoggerHook'),
+        dict(type='TensorboardLoggerHook')
+    ])
